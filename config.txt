@@ -1,0 +1,5 @@
+# Tragen Sie hier Ihre Standard-Aktien ein (mit Komma getrennt).
+# Diese Liste wird beim Start des Programms automatisch geladen.
+# Beispiel: SAP.DE, 840400, MSFT, AAPL
+
+VOW3.DE, INGA.AS, LHA.DE, NEDAP.AS, VICI, KMI, O, ENB, ECMPA.AS, COLD, VEI.OL, ALV.DE, DG.PA, SCMN.SW, IMB.L, ITX.MC, NESN.SW, SAN.PA
