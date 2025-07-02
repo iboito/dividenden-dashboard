@@ -35,9 +35,11 @@ def get_fx_rate_yahoo(src="USD", dst="EUR"):
 st.set_page_config(page_title="Dividendenrendite Tracker", layout="wide")
 st.title("Dividendenrendite Tracker (Streamlit-Version)")
 
-# Session State für Overrides
+# Session State für Overrides und Formularsteuerung
 if "dividend_overrides" not in st.session_state:
     st.session_state["dividend_overrides"] = load_overrides()
+if "show_override_form" not in st.session_state:
+    st.session_state["show_override_form"] = False
 
 # Eingabe der Ticker
 tickers_input = st.text_input(
@@ -46,7 +48,7 @@ tickers_input = st.text_input(
 )
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-# Button-Leiste: Analyse links, dann rechts manuell erfassen und ganz rechts löschen
+# Button-Leiste: Analyse ganz links, dann rechts Override und ganz rechts Löschen
 col_left, col_spacer, col_override, col_delete = st.columns([2, 10, 2, 2])
 
 with col_left:
@@ -62,7 +64,11 @@ if delete_clicked:
     st.session_state["dividend_overrides"] = {}
     if os.path.exists(OVERRIDE_FILE):
         os.remove(OVERRIDE_FILE)
+    st.session_state["show_override_form"] = False
     st.experimental_rerun()
+
+if override_clicked:
+    st.session_state["show_override_form"] = True
 
 if analyse_clicked or "results" not in st.session_state:
     results = []
@@ -158,8 +164,8 @@ if "results" in st.session_state and st.session_state["results"] is not None:
         use_container_width=True
     )
 
-    # Manuelle Dividenden-Overrides: Dialog per Button
-    if override_clicked:
+    # Manuelle Dividenden-Overrides: Dialog per Button, bleibt offen bis Speichern/Abbruch
+    if st.session_state["show_override_form"]:
         company_ticker_map = {row["Unternehmen"]: row["Ticker"] for _, row in df.iterrows()}
         company_names = sorted(company_ticker_map.keys())
         with st.form("override_form", clear_on_submit=True):
@@ -167,7 +173,9 @@ if "results" in st.session_state and st.session_state["results"] is not None:
             ticker = company_ticker_map[selected_company]
             curr_override = overrides.get(ticker, "")
             value = st.text_input("Dividende in Euro (leer = Override löschen)", value=str(curr_override) if curr_override != "" else "")
-            submitted = st.form_submit_button("Speichern")
+            col_save, col_cancel = st.columns([1,1])
+            submitted = col_save.form_submit_button("Speichern")
+            cancelled = col_cancel.form_submit_button("Abbrechen")
             if submitted:
                 value = value.replace(",", ".").strip()
                 if value == "":
@@ -178,6 +186,11 @@ if "results" in st.session_state and st.session_state["results"] is not None:
                         overrides[ticker] = float(value)
                     except Exception:
                         st.error(f"Ungültiger Wert für {selected_company}: {value}")
+                        st.stop()
                 save_overrides(overrides)
                 st.session_state["dividend_overrides"] = overrides
+                st.session_state["show_override_form"] = False
+                st.experimental_rerun()
+            if cancelled:
+                st.session_state["show_override_form"] = False
                 st.experimental_rerun()
