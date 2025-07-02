@@ -65,7 +65,7 @@ if delete_clicked:
     if os.path.exists(OVERRIDE_FILE):
         os.remove(OVERRIDE_FILE)
     st.session_state["show_override_form"] = False
-    st.experimental_rerun()
+    st.rerun()  # GEÄNDERT: st.experimental_rerun() → st.rerun()
 
 if override_clicked:
     st.session_state["show_override_form"] = True
@@ -80,11 +80,13 @@ if analyse_clicked or "results" not in st.session_state:
             resolved_ticker = info.get('symbol', ticker)
             current_price = info.get('regularMarketPrice', info.get('currentPrice', 0))
             currency_code = info.get('currency', 'USD')
+            
             # UK-Fix: Kurs und Dividende in Pence → Pfund
             if ticker.endswith('.L') and currency_code == "GBp":
                 if current_price:
                     current_price = current_price / 100
                 currency_code = "GBP"
+            
             fx_rate = get_fx_rate_yahoo(currency_code, "EUR") if currency_code != "EUR" else 1.0
             price_eur = round(current_price * fx_rate, 2) if current_price else None
 
@@ -127,6 +129,7 @@ if analyse_clicked or "results" not in st.session_state:
             else:
                 dividend_str = "N/A"
                 yield_str = "N/A"
+            
             price_str = f"€ {price_eur:,.2f}" if price_eur else "N/A"
             results.append({
                 "Unternehmen": company_name,
@@ -148,6 +151,7 @@ if analyse_clicked or "results" not in st.session_state:
 # Ergebnisse anzeigen
 if "results" in st.session_state and st.session_state["results"] is not None:
     df = st.session_state["results"].copy()
+    
     # Markiere überschrieben Werte
     overrides = st.session_state["dividend_overrides"]
     override_tickers = set(overrides.keys())
@@ -157,8 +161,10 @@ if "results" in st.session_state and st.session_state["results"] is not None:
             highlight.append(True)
         else:
             highlight.append(False)
+    
     def highlight_overrides(val, is_override):
         return 'background-color: #2A3B4D; color: #F9F9F9' if is_override else ''
+    
     st.dataframe(
         df.style.apply(lambda x: [highlight_overrides(v, override) for v, override in zip(x, highlight)], axis=1),
         use_container_width=True
@@ -168,14 +174,17 @@ if "results" in st.session_state and st.session_state["results"] is not None:
     if st.session_state["show_override_form"]:
         company_ticker_map = {row["Unternehmen"]: row["Ticker"] for _, row in df.iterrows()}
         company_names = sorted(company_ticker_map.keys())
+        
         with st.form("override_form", clear_on_submit=True):
             selected_company = st.selectbox("Unternehmen auswählen", company_names)
             ticker = company_ticker_map[selected_company]
             curr_override = overrides.get(ticker, "")
             value = st.text_input("Dividende in Euro (leer = Override löschen)", value=str(curr_override) if curr_override != "" else "")
+            
             col_save, col_cancel = st.columns([1,1])
             submitted = col_save.form_submit_button("Speichern")
             cancelled = col_cancel.form_submit_button("Abbrechen")
+            
             if submitted:
                 value = value.replace(",", ".").strip()
                 if value == "":
@@ -190,7 +199,8 @@ if "results" in st.session_state and st.session_state["results"] is not None:
                 save_overrides(overrides)
                 st.session_state["dividend_overrides"] = overrides
                 st.session_state["show_override_form"] = False
-                st.experimental_rerun()
+                st.rerun()  # GEÄNDERT: st.experimental_rerun() → st.rerun()
+            
             if cancelled:
                 st.session_state["show_override_form"] = False
-                st.experimental_rerun()
+                st.rerun()  # GEÄNDERT: st.experimental_rerun() → st.rerun()
