@@ -60,17 +60,22 @@ with col_override:
 with col_delete:
     delete_clicked = st.button("Alle manuellen Dividenden löschen", use_container_width=True)
 
+# ROBUSTE LÖSUNG: Override-Änderungen verfolgen
+override_changed = st.session_state.pop("override_changed", False)
+
 if delete_clicked:
     st.session_state["dividend_overrides"] = {}
     if os.path.exists(OVERRIDE_FILE):
         os.remove(OVERRIDE_FILE)
     st.session_state["show_override_form"] = False
-    st.rerun()  # GEÄNDERT: st.experimental_rerun() → st.rerun()
+    st.session_state["override_changed"] = True
+    st.rerun()
 
 if override_clicked:
     st.session_state["show_override_form"] = True
 
-if analyse_clicked or "results" not in st.session_state:
+# ROBUSTE LÖSUNG: Berechnung bei Analyse-Button, Override-Änderung oder fehlenden Ergebnissen
+if analyse_clicked or override_changed or "results" not in st.session_state:
     results = []
     for ticker in tickers:
         try:
@@ -199,8 +204,10 @@ if "results" in st.session_state and st.session_state["results"] is not None:
                 save_overrides(overrides)
                 st.session_state["dividend_overrides"] = overrides
                 st.session_state["show_override_form"] = False
-                st.rerun()  # GEÄNDERT: st.experimental_rerun() → st.rerun()
+                # ROBUSTE LÖSUNG: Flag setzen statt results löschen
+                st.session_state["override_changed"] = True
+                st.rerun()
             
             if cancelled:
                 st.session_state["show_override_form"] = False
-                st.rerun()  # GEÄNDERT: st.experimental_rerun() → st.rerun()
+                st.rerun()
