@@ -1,7 +1,7 @@
 # ───────────────────────────────────────────────────────────────
-# Dividenden-Dashboard  –  Streamlit-App
-# • Batch-Abruf (nur 2 HTTP-Calls)                   • stabiles Rate-Limit-Handling
-# • Robuste Kursveränderungen (unadjusted Close)     • Variable do_edit statt do_ovr
+# Dividenden-Dashboard – Streamlit-App
+# • Batch-Abruf (nur 2 API-Calls)  • Rate-Limit-sicher
+# • Robuste Kursveränderungen      • Fehler­resistenter Sortier-Helper
 # ───────────────────────────────────────────────────────────────
 import streamlit as st
 import yfinance as yf
@@ -17,10 +17,10 @@ DEFAULT_TICKERS = (
 # Kurzformen → Yahoo-Ticker
 TICKER_MAP = {"WCH": "WCH.DE", "LVMH": "MC.PA"}
 
-# ───────────── Hilfsfunktionen ─────────────────────────────────
+# ───────── Hilfs­funktionen ────────────────────────────────────
 norm = lambda t: TICKER_MAP.get(t.upper(), t.upper())
 
-def load_overrides() -> dict:
+def load_overrides():
     if os.path.exists(OVERRIDE_FILE):
         try:
             return json.load(open(OVERRIDE_FILE, encoding="utf-8"))
@@ -28,12 +28,12 @@ def load_overrides() -> dict:
             pass
     return {}
 
-def save_overrides(d: dict) -> None:
+def save_overrides(d):
     json.dump(d, open(OVERRIDE_FILE, "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
 
 @st.cache_data(ttl=3600)
-def fx(src: str, dst: str = "EUR") -> float:
+def fx(src, dst="EUR"):
     if src == dst:
         return 1.0
     pair = f"{src}{dst}=X"
@@ -42,7 +42,8 @@ def fx(src: str, dst: str = "EUR") -> float:
     except Exception:
         return 1.0
 
-def safe_info(tkr_obj: yf.Ticker, pause=1.2, tries=3) -> dict:
+def safe_info(tkr_obj, pause=1.2, tries=3):
+    """holt .info bis zu <tries>-mal, mit Pause – vermeidet Rate-Limit"""
     for _ in range(tries):
         data = tkr_obj.get_info()
         if data:
@@ -50,46 +51,57 @@ def safe_info(tkr_obj: yf.Ticker, pause=1.2, tries=3) -> dict:
         time.sleep(pause)
     return {}
 
-def pct_from_series(series: pd.Series) -> list[str]:
+def pct_from_series(series: pd.Series):
+    """liefert ['T','W','M','J']-Änderungen; unadjusted & feiertagsfest"""
     if series.empty or len(series) < 2:
         return ["N/A"] * 4
     latest = series.iloc[-1]
-    spans  = [1, 7, 30, 365]
-    out    = []
+    out, spans = [], [1, 7, 30, 365]
     for d in spans:
         tgt  = series.index[-1] - pd.Timedelta(days=d)
         idx  = series.index.get_indexer([tgt], method="bfill")[0]
         past = series.iloc[idx]
         if past <= 0:
-            out.append("N/A")
-            continue
+            out.append("N/A"); continue
         pct = (latest - past) / past * 100
         out.append("0,0" if abs(pct) < .05
                    else f"{pct:.1f}".replace('.', ',').lstrip('+'))
     return out
 
-# ───────────── Streamlit-UI ────────────────────────────────────
+def day_change(val):
+    """erster Teil der Veränderungs-Spalte → float, sonst –∞"""
+    if isinstance(val, str) and "/" in val:
+        try:
+            return float(val.split("/")[0].replace(",", "."))
+        except ValueError:
+            pass
+    return float("-inf")
+
+# ───────── Streamlit-UI ────────────────────────────────────────
 st.set_page_config("Dividenden-Dashboard", layout="wide")
 st.title("📊 Dividenden-Dashboard")
 
-if "ovr" not in st.session_state:    st.session_state.ovr = load_overrides()
-if "res" not in st.session_state:    st.session_state.res = None
+if "ovr" not in st.session_state:
+    st.session_state.ovr = load_overrides()
+if "res" not in st.session_state:
+    st.session_state.res = None
 
 raw  = st.text_input("Ticker (Komma getrennt)", DEFAULT_TICKERS)
 tick = [norm(t) for t in raw.split(",") if t.strip()]
 
 c_run, c_edit, c_del = st.columns(3)
-do_run  = c_run.button("Analyse starten",  use_container_width=True)
+do_run  = c_run.button("Analyse starten",   use_container_width=True)
 do_edit = c_edit.button("Dividende manuell", use_container_width=True)
-do_del  = c_del.button("Overrides löschen", use_container_width=True)
+do_del  = c_del.button("Overrides löschen",  use_container_width=True)
 
 if do_del:
     st.session_state.ovr = {}
-    if os.path.exists(OVERRIDE_FILE): os.remove(OVERRIDE_FILE)
+    if os.path.exists(OVERRIDE_FILE):
+        os.remove(OVERRIDE_FILE)
     st.session_state.res = None
     st.experimental_rerun()
 
-# ───────────── Analyse-Logik ───────────────────────────────────
+# ───────── Analyse ─────────────────────────────────────────────
 if do_run and tick:
     bulk = yf.download(
         tick, period="400d", interval="1d",
@@ -100,25 +112,26 @@ if do_run and tick:
     for t in tick:
         ts  = datetime.datetime.now().strftime("%H:%M:%S")
         obj = yf.Ticker(t)
-        info = safe_info(obj)                      # ← Rate-Limit-Aware
+        info = safe_info(obj)
 
-        # Name, Preis, Währung
+        # Preis, Name, Währung
         if info:
             name  = info.get("longName") or info.get("shortName") or t
             price = info.get("regularMarketPrice") or info.get("currentPrice")
             cur   = info.get("currency", "USD")
         else:
             name  = t
-            series = bulk[t]["Close"] if isinstance(bulk.columns, pd.MultiIndex) \
-                     else bulk["Close"]
-            price = series.dropna().iloc[-1] if not series.empty else None
+            series_fallback = (bulk[t]["Close"].dropna()
+                               if isinstance(bulk.columns, pd.MultiIndex)
+                               else bulk["Close"].dropna())
+            price = series_fallback.iloc[-1] if not series_fallback.empty else None
             cur   = "EUR"
 
         if t.endswith(".L") and cur == "GBp" and price:
             price /= 100; cur = "GBP"
         price_eur = round(price * fx(cur), 2) if price else None
 
-        # Dividende
+        # Dividende berechnen / überschreiben
         div = st.session_state.ovr.get(t)
         if div is None:
             div = info.get("trailingAnnualDividendRate") if info else 0
@@ -135,34 +148,34 @@ if do_run and tick:
                 div = div_ser.tail(252).sum() if not div_ser.empty else 0
         div_eur = round(div * fx(cur), 2) if div else None
 
-        # Close-Serie → Veränderungen
-        series = bulk[t]["Close"] if isinstance(bulk.columns, pd.MultiIndex) \
-                 else bulk["Close"]
-        changes = "/".join(pct_from_series(series.dropna()))
+        # Close-Serie → Kursveränderungen
+        series = (bulk[t]["Close"]
+                  if isinstance(bulk.columns, pd.MultiIndex)
+                  else bulk["Close"])
+        change_str = "/".join(pct_from_series(series.dropna()))
 
         rows.append({
             "Unternehmen":            name,
             "Ticker":                 t,
             "Kurs (€)":               f"€ {price_eur:,.2f}" if price_eur else "N/A",
-            "Jahresdividende (€)":    f"€ {div_eur:,.2f}"   if div_eur else "N/A",
+            "Jahresdividende (€)":    f"€ {div_eur:,.2f}"   if div_eur   else "N/A",
             "Dividendenrendite (%)":  f"{div_eur/price_eur*100:.2f}"
                                        if div_eur and price_eur else "N/A",
-            "Veränderung T/W/M/J":    changes,
+            "Veränderung T/W/M/J":    change_str,
             "Stand":                  ts,
         })
 
     df = pd.DataFrame(rows)
-    df["__"] = df["Veränderung T/W/M/J"].apply(
-        lambda x: float(x.split("/")[0].replace(",", ".")) if "/" in x else -9e9)
-    df.sort_values("__", ascending=False, inplace=True)
-    df.drop(columns="__", inplace=True)
+    df["__sort"] = df["Veränderung T/W/M/J"].apply(day_change)
+    df.sort_values("__sort", ascending=False, inplace=True)
+    df.drop(columns="__sort", inplace=True)
     st.session_state.res = df
 
-# ───────────── Tabelle ─────────────────────────────────────────
+# ───────── Tabelle ────────────────────────────────────────────
 if st.session_state.res is not None:
     st.dataframe(st.session_state.res, use_container_width=True)
 
-# ───────────── Override-Dialog ─────────────────────────────────
+# ───────── Override-Dialog ────────────────────────────────────
 if do_edit and st.session_state.res is not None:
     cmap = {r["Unternehmen"]: r["Ticker"] for _, r in st.session_state.res.iterrows()}
     with st.form("ovr", clear_on_submit=True):
@@ -171,8 +184,8 @@ if do_edit and st.session_state.res is not None:
         tkr  = cmap[comp]
         cur  = st.session_state.ovr.get(tkr, "")
         val  = st.text_input("Dividende in € (leer = löschen)", value=str(cur))
-        c1, c2 = st.columns(2)
-        if c1.form_submit_button("Speichern"):
+        a, b = st.columns(2)
+        if a.form_submit_button("Speichern"):
             v = val.replace(",", ".").strip()
             if v == "":
                 st.session_state.ovr.pop(tkr, None)
@@ -184,5 +197,5 @@ if do_edit and st.session_state.res is not None:
             save_overrides(st.session_state.ovr)
             st.session_state.res = None
             st.experimental_rerun()
-        if c2.form_submit_button("Abbrechen"):
+        if b.form_submit_button("Abbrechen"):
             st.experimental_rerun()
