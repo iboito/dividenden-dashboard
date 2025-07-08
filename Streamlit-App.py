@@ -1,5 +1,5 @@
 # ───────────────────────────────────────────────────────────────
-# Dividenden-Dashboard – Streamlit-App (Spalte „Veränderung …“)
+# Dividenden-Dashboard – Streamlit-App (stabil & sortiert)
 # ───────────────────────────────────────────────────────────────
 import streamlit as st
 import yfinance as yf
@@ -14,15 +14,15 @@ DEFAULT_TICKERS = (
 )
 
 # ───────────────────────────────────────────────────────────────
-# 1. Hilfs­funktionen
+# 1. Hilfsfunktionen
 # ───────────────────────────────────────────────────────────────
-TICKER_MAP = {           # Kurz­kürzel → Yahoo-Ticker
+TICKER_MAP = {                     # Kurzformen → Yahoo-Ticker
     "WCH":  "WCH.DE",
     "LVMH": "MC.PA",
 }
 
-def norm(tkr: str) -> str:
-    return TICKER_MAP.get(tkr.upper(), tkr.upper())
+def norm(t: str) -> str:
+    return TICKER_MAP.get(t.upper(), t.upper())
 
 def load_overrides() -> dict:
     if os.path.exists(OVERRIDE_FILE):
@@ -46,26 +46,24 @@ def fx(src: str, dst: str = "EUR") -> float:
     except Exception:
         return 1.0
 
-def pct_changes(tkr: yf.Ticker) -> list[str]:
-    """%-Änderungen Tag / Woche / Monat / Jahr (Fallback „N/A“)."""
+def pct_changes(stock: yf.Ticker) -> list[str]:
+    """%-Änderungen für Tag/Woche/Monat/Jahr; liefert 4 Strings oder 'N/A'."""
     try:
-        hist = tkr.history("400d", "1d", auto_adjust=True)
+        hist = stock.history("400d", "1d", auto_adjust=True)
         if hist.empty:
             return ["N/A"] * 4
-        close  = hist["Close"].dropna()
-        latest = close.iloc[-1]
-        spans  = [1, 7, 30, 365]
-        out    = []
+        close, latest = hist["Close"].dropna(), hist["Close"].dropna().iloc[-1]
+        spans, res = [1, 7, 30, 365], []
         for d in spans:
             tgt  = close.index[-1] - pd.Timedelta(days=d)
             past = close.loc[close.index >= tgt]
             if past.empty or past.iloc[0] <= 0:
-                out.append("N/A")
-            else:
-                pct = (latest - past.iloc[0]) / past.iloc[0] * 100
-                val = "0,0" if abs(pct) < .05 else f"{pct:.1f}".replace(".", ",").lstrip("+")
-                out.append(val)
-        return out
+                res.append("N/A")
+                continue
+            pct = (latest - past.iloc[0]) / past.iloc[0] * 100
+            res.append("0,0" if abs(pct) < .05
+                       else f"{pct:.1f}".replace(".", ",").lstrip("+"))
+        return res
     except Exception:
         return ["N/A"] * 4
 
@@ -75,13 +73,12 @@ def pct_changes(tkr: yf.Ticker) -> list[str]:
 st.set_page_config("Dividenden-Dashboard", layout="wide")
 st.title("📊 Dividenden-Dashboard")
 
-# Session-State
 if "ovr" not in st.session_state:
     st.session_state.ovr = load_overrides()
 if "results" not in st.session_state:
     st.session_state.results = None
 
-# Eingabe
+# Eingabezeile
 tick_raw = st.text_input(
     "Aktien-Ticker (Komma getrennt)", value=DEFAULT_TICKERS)
 tickers  = [norm(x) for x in tick_raw.split(",") if x.strip()]
@@ -100,23 +97,23 @@ if do_del:
     st.session_state.results = None
     st.experimental_rerun()
 
-# Analyse
+# Analyse starten
 if do_run and tickers:
     rows = []
-    for tkr in tickers:
-        stamp = datetime.datetime.now().strftime("%H:%M:%S")
+    for t in tickers:
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
         try:
-            stk   = yf.Ticker(tkr)
-            info  = stk.info
-            name  = info.get("longName") or info.get("shortName") or info.get("symbol") or tkr
+            stck  = yf.Ticker(t)
+            info  = stck.info
+            name  = info.get("longName") or info.get("shortName") or info.get("symbol") or t
             price = info.get("regularMarketPrice") or info.get("currentPrice")
             cur   = info.get("currency", "USD")
-            if tkr.endswith(".L") and cur == "GBp" and price:
+            if t.endswith(".L") and cur == "GBp" and price:
                 price /= 100; cur = "GBP"
-            peur = round(price * fx(cur), 2) if price else None
+            price_eur = round(price * fx(cur), 2) if price else None
 
-            # Dividende  ----------------------------------------------------
-            div = st.session_state.ovr.get(tkr)
+            # Dividende (Override → Yahoo → Yield → Historie)
+            div = st.session_state.ovr.get(t)
             if div is None:
                 direct = info.get("trailingAnnualDividendRate")
                 if direct and direct > 0:
@@ -126,40 +123,46 @@ if do_run and tickers:
                     if dy and price:
                         div = price * (dy / 100 if dy > 1 else dy)
                     else:
-                        hist = stk.history("1y", actions=True, auto_adjust=True)
+                        hist = stck.history("1y", actions=True, auto_adjust=True)
                         div  = hist["Dividends"].sum() if "Dividends" in hist else 0
-            deur = round(div * fx(cur), 2) if div else None
+            div_eur = round(div * fx(cur), 2) if div else None
 
-            div_str = f"€ {deur:,.2f}" if deur and peur else "N/A"
-            yld_str = f"{deur / peur * 100:.2f}" if deur and peur else "N/A"
+            div_str = f"€ {div_eur:,.2f}" if div_eur and price_eur else "N/A"
+            yld_str = f"{div_eur / price_eur * 100:.2f}" if div_eur and price_eur else "N/A"
 
-            # Kurs­veränderungen -------------------------------------------
-            change_str = "/".join(pct_changes(stk))
+            change_str = "/".join(pct_changes(stck))
 
             rows.append({
                 "Unternehmen":            name,
-                "Ticker":                 tkr,
-                "Kurs (€)":               f"€ {peur:,.2f}" if peur else "N/A",
+                "Ticker":                 t,
+                "Kurs (€)":               f"€ {price_eur:,.2f}" if price_eur else "N/A",
                 "Jahresdividende (€)":    div_str,
                 "Dividendenrendite (%)":  yld_str,
-                "Veränderung T/W/M/J":    change_str,    # ❶ Spalte immer gesetzt
-                "Stand":                  stamp,
+                "Veränderung T/W/M/J":    change_str,
+                "Stand":                  ts,
             })
         except Exception:
             rows.append({
-                "Unternehmen": f"Fehler bei '{tkr}'", "Ticker": tkr,
+                "Unternehmen": f"Fehler bei '{t}'", "Ticker": t,
                 "Kurs (€)": "N/A", "Jahresdividende (€)": "N/A",
-                "Dividendenrendite (%)": "N/A",
-                "Veränderung T/W/M/J": "N/A", "Stand": stamp,
+                "Dividendenrendite (%)": "N/A", "Veränderung T/W/M/J": "N/A",
+                "Stand": ts,
             })
 
     df = pd.DataFrame(rows)
 
-    # Sortieren nach Tages­veränderung
-    df["__sort"] = df["Veränderung T/W/M/J"].apply(
-        lambda x: float(x.split("/")[0].replace(",", ".")) if "/" in x else -9e9)
-    df.sort_values("__sort", ascending=False, inplace=True)
-    df.drop(columns="__sort", inplace=True)
+    # Sortierung nach Tages-Veränderung
+    def _day(val: str) -> float:
+        if not isinstance(val, str) or "/" not in val:
+            return float("-inf")
+        try:
+            return float(val.split("/")[0].replace(",", "."))
+        except Exception:
+            return float("-inf")
+
+    df["__s"] = df["Veränderung T/W/M/J"].apply(_day)
+    df.sort_values("__s", ascending=False, inplace=True)
+    df.drop(columns="__s", inplace=True)
 
     st.session_state.results = df
 
@@ -180,6 +183,7 @@ if do_edit and st.session_state.results is not None:
         a, b = st.columns(2)
         ok   = a.form_submit_button("Speichern")
         cancel = b.form_submit_button("Abbrechen")
+
         if ok:
             v = val.replace(",", ".").strip()
             if v == "":
@@ -193,5 +197,6 @@ if do_edit and st.session_state.results is not None:
             st.success("Gespeichert – Analyse wird neu geladen …")
             st.session_state.results = None
             st.experimental_rerun()
+
         if cancel:
             st.experimental_rerun()
