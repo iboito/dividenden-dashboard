@@ -1,3 +1,5 @@
+import streamlit as st
+st.write("⚙️ laufende Streamlit-Version:", st.__version__)
 # ───────────────────────────────────────────────────────────────
 # Dividendenrendite Tracker   –   Streamlit-Version
 # ───────────────────────────────────────────────────────────────
