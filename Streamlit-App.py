@@ -48,41 +48,29 @@ def fx(src: str, dst: str = "EUR") -> float:
     except Exception:
         return 1.0
 
-def pct_changes(stock: yf.Ticker) -> list[str]:
-    """
-    Robuste %-Änderungen für
-      1 Tag | 1 Woche | 1 Monat | 1 Jahr
-    • nutzt *unadjusted* Close-Preise
-    • sucht den nächst­folgenden Handelstag (bfill)
-    • liefert 'N/A' wenn Daten fehlen
-    """
-    try:
-        hist = stock.history("400d", "1d", auto_adjust=False)          # ← NEU
-        close = hist["Close"].dropna()
-        if close.empty or len(close) < 2:
-            return ["N/A"] * 4
-
-        latest = close.iloc[-1]
-        spans  = [1, 7, 30, 365]
-        out    = []
-
-        for days in spans:
-            target = close.index[-1] - pd.Timedelta(days=days)
-            idx    = close.index.get_indexer([target], method="bfill")[0]  # ← NEU
-            past   = close.iloc[idx]
-
-            if past <= 0:
-                out.append("N/A")
-                continue
-
-            pct = (latest - past) / past * 100
-            if abs(pct) < 0.05:
-                out.append("0,0")
-            else:
-                out.append(f"{pct:.1f}".replace(".", ",").lstrip("+"))
-        return out
-    except Exception:
+def pct_changes(stock):
+    hist = stock.history("400d", "1d", auto_adjust=False)
+    close = hist["Close"].dropna()
+    if close.empty or len(close) < 2:
         return ["N/A"] * 4
+
+    latest = close.iloc[-1]
+    spans  = [1, 7, 30, 365]
+    out    = []
+
+    for d in spans:
+        target = close.index[-1] - pd.Timedelta(days=d)
+        idx    = close.index.get_indexer([target], method="bfill")[0]
+        past   = close.iloc[idx]
+
+        if past <= 0:
+            out.append("N/A")
+            continue
+
+        pct = (latest - past) / past * 100
+        out.append("0,0" if abs(pct) < 0.05
+                   else f"{pct:.1f}".replace('.', ',').lstrip('+'))
+    return out
 
 # ───────────────────────────────────────────────────────────────
 # 2. Streamlit-App
