@@ -1,9 +1,6 @@
 # ───────────────────────────────────────────────────────────────
-# Dividenden-Dashboard  |  Streamlit-App
-# • Batch-Abruf (2 HTTP-Calls) ─ keine Yahoo-Rate-Limits
-# • Robuste Kurs­veränderungen (unadjusted Close)
-# • Fehler­resistenter Sortier-Helper
-# • Korrekte Multi-Index-Handhabung für ALLE Ticker
+# Dividenden-Dashboard – Streamlit-App
+# Batch-Abruf   |   Rate-Limit-sicher   |   Robuste Kurs­veränderungen
 # ───────────────────────────────────────────────────────────────
 import streamlit as st
 import yfinance as yf
@@ -17,10 +14,7 @@ DEFAULT_TICKERS = (
 )
 
 # Kurzformen → Yahoo-Ticker
-TICKER_MAP = {
-    "WCH":  "WCH.DE",
-    "LVMH": "MC.PA",
-}
+TICKER_MAP = {"WCH": "WCH.DE", "LVMH": "MC.PA"}
 
 # ───────── Hilfs­funktionen ────────────────────────────────────
 norm = lambda t: TICKER_MAP.get(t.upper(), t.upper())
@@ -59,7 +53,8 @@ def pct_from_series(series: pd.Series):
     if series.empty or len(series) < 2:
         return ["N/A"] * 4
     latest = series.iloc[-1]
-    out, spans = [], [1, 7, 30, 365]
+    spans  = [1, 7, 30, 365]
+    out    = []
     for d in spans:
         tgt  = series.index[-1] - pd.Timedelta(days=d)
         idx  = series.index.get_indexer([tgt], method="bfill")[0]
@@ -98,7 +93,8 @@ do_del  = c_del.button("Overrides löschen",   use_container_width=True)
 
 if do_del:
     st.session_state.ovr = {}
-    if os.path.exists(OVERRIDE_FILE): os.remove(OVERRIDE_FILE)
+    if os.path.exists(OVERRIDE_FILE):
+        os.remove(OVERRIDE_FILE)
     st.session_state.res = None
     st.experimental_rerun()
 
@@ -109,20 +105,21 @@ if do_run and tick:
         group_by="ticker", auto_adjust=False, threads=False
     )
 
-    # Close-Tabelle für alle Ticker
+    # Close- und Dividenden-DataFrames sicher anlegen
     if isinstance(bulk.columns, pd.MultiIndex):
         close_df = bulk.xs("Close", level=1, axis=1)
-        div_df   = bulk.xs("Dividends", level=1, axis=1, drop_level=False)
-    else:
-        close_df = bulk[["Close"]].copy()
-        close_df.columns = pd.Index([tick[0]])
+        if "Dividends" in bulk.columns.get_level_values(1):
+            div_df = bulk.xs("Dividends", level=1, axis=1)
+        else:
+            div_df = pd.DataFrame()
+    else:                      # nur 1 Ticker
+        close_df = bulk[["Close"]].rename(columns={"Close": tick[0]})
         div_df   = bulk[["Dividends"]] if "Dividends" in bulk else pd.DataFrame()
 
     rows = []
     for t in tick:
         ts  = datetime.datetime.now().strftime("%H:%M:%S")
-        obj = yf.Ticker(t)
-        info = safe_info(obj)
+        info = safe_info(yf.Ticker(t))
 
         # Name, Preis, Währung
         if info:
@@ -146,11 +143,11 @@ if do_run and tick:
                 dy = info.get("dividendYield") if info else 0
                 if dy and price:
                     div = price * (dy / 100 if dy > 1 else dy)
-            if not div and t in div_df:
+            if not div and (not div_df.empty and t in div_df):
                 div = div_df[t].tail(252).sum()
         div_eur = round(div * fx(cur), 2) if div else None
 
-        # Kursveränderungen
+        # Kurs­veränderungen
         series = close_df[t].dropna() if t in close_df else pd.Series()
         change_str = "/".join(pct_from_series(series))
 
