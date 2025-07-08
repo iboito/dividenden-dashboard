@@ -1,6 +1,6 @@
 # ───────────────────────────────────────────────────────────────
 # Dividenden-Dashboard – Streamlit-App
-# Batch-Abruf   |   Rate-Limit-sicher   |   Robuste Kurs­veränderungen
+# Batch-Abruf | robust gegen Yahoo-Limits | saubere Multi-Index-Behandlung
 # ───────────────────────────────────────────────────────────────
 import streamlit as st
 import yfinance as yf
@@ -13,12 +13,12 @@ DEFAULT_TICKERS = (
     "VOW3.DE, INGA.AS, LHA.DE, VICI, KMI, O, ENB, ALV.DE, MC.PA"
 )
 
-# Kurzformen → Yahoo-Ticker
+# optionale Kurzformen
 TICKER_MAP = {"WCH": "WCH.DE", "LVMH": "MC.PA"}
 
-# ───────── Hilfs­funktionen ────────────────────────────────────
 norm = lambda t: TICKER_MAP.get(t.upper(), t.upper())
 
+# ───────── Datei-Helfer ────────────────────────────────────────
 def load_overrides():
     if os.path.exists(OVERRIDE_FILE):
         try:
@@ -31,6 +31,7 @@ def save_overrides(d):
     json.dump(d, open(OVERRIDE_FILE, "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
 
+# ───────── Yahoo-Helfer ───────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fx(src, dst="EUR"):
     if src == dst:
@@ -49,7 +50,8 @@ def safe_info(tkr_obj, pause=1.2, tries=3):
         time.sleep(pause)
     return {}
 
-def pct_from_series(series: pd.Series):
+# ───────── Prozent-Berechnung ─────────────────────────────────
+def pct_from_series(series: pd.Series) -> list[str]:
     if series.empty or len(series) < 2:
         return ["N/A"] * 4
     latest = series.iloc[-1]
@@ -74,7 +76,7 @@ def day_change(val):
             pass
     return float("-inf")
 
-# ───────── Streamlit-UI ────────────────────────────────────────
+# ───────── Streamlit-UI ───────────────────────────────────────
 st.set_page_config("Dividenden-Dashboard", layout="wide")
 st.title("📊 Dividenden-Dashboard")
 
@@ -87,48 +89,53 @@ raw  = st.text_input("Ticker (Komma getrennt)", DEFAULT_TICKERS)
 tick = [norm(t) for t in raw.split(",") if t.strip()]
 
 c_run, c_edit, c_del = st.columns(3)
-do_run  = c_run.button("Analyse starten",     use_container_width=True)
-do_edit = c_edit.button("Dividende manuell",  use_container_width=True)
-do_del  = c_del.button("Overrides löschen",   use_container_width=True)
+do_run  = c_run.button("Analyse starten",    use_container_width=True)
+do_edit = c_edit.button("Dividende manuell", use_container_width=True)
+do_del  = c_del.button("Overrides löschen",  use_container_width=True)
 
 if do_del:
     st.session_state.ovr = {}
-    if os.path.exists(OVERRIDE_FILE):
-        os.remove(OVERRIDE_FILE)
+    if os.path.exists(OVERRIDE_FILE): os.remove(OVERRIDE_FILE)
     st.session_state.res = None
     st.experimental_rerun()
 
-# ───────── Analyse ─────────────────────────────────────────────
+# ───────── Analyse ────────────────────────────────────────────
 if do_run and tick:
     bulk = yf.download(
         tick, period="400d", interval="1d",
         group_by="ticker", auto_adjust=False, threads=False
     )
 
-    # Close- und Dividenden-DataFrames sicher anlegen
+    # Close- und Dividenden-DFs robust erzeugen
     if isinstance(bulk.columns, pd.MultiIndex):
         close_df = bulk.xs("Close", level=1, axis=1)
-        if "Dividends" in bulk.columns.get_level_values(1):
-            div_df = bulk.xs("Dividends", level=1, axis=1)
-        else:
-            div_df = pd.DataFrame()
-    else:                      # nur 1 Ticker
+        div_df   = bulk.xs("Dividends", level=1, axis=1) \
+                   if "Dividends" in bulk.columns.get_level_values(1) else pd.DataFrame()
+    else:  # nur 1 Ticker
         close_df = bulk[["Close"]].rename(columns={"Close": tick[0]})
         div_df   = bulk[["Dividends"]] if "Dividends" in bulk else pd.DataFrame()
 
+    # Hilfs-Suche nach Serie (Ticker in Spalten könnte ohne Suffix stehen)
+    def find_close(df: pd.DataFrame, tkr: str) -> pd.Series:
+        if tkr in df:
+            return df[tkr].dropna()
+        uc = {c.upper(): c for c in df.columns}
+        real = uc.get(tkr.upper())
+        return df[real].dropna() if real else pd.Series()
+
     rows = []
     for t in tick:
-        ts  = datetime.datetime.now().strftime("%H:%M:%S")
+        ts   = datetime.datetime.now().strftime("%H:%M:%S")
         info = safe_info(yf.Ticker(t))
 
-        # Name, Preis, Währung
+        # Name / Kurs / Währung
         if info:
             name  = info.get("longName") or info.get("shortName") or t
             price = info.get("regularMarketPrice") or info.get("currentPrice")
             cur   = info.get("currency", "USD")
         else:
             name  = t
-            price = close_df[t].dropna().iloc[-1] if t in close_df else None
+            price = find_close(close_df, t).iloc[-1] if not find_close(close_df, t).empty else None
             cur   = "EUR"
 
         if t.endswith(".L") and cur == "GBp" and price:
@@ -147,8 +154,8 @@ if do_run and tick:
                 div = div_df[t].tail(252).sum()
         div_eur = round(div * fx(cur), 2) if div else None
 
-        # Kurs­veränderungen
-        series = close_df[t].dropna() if t in close_df else pd.Series()
+        # Veränderungen
+        series     = find_close(close_df, t)
         change_str = "/".join(pct_from_series(series))
 
         rows.append({
