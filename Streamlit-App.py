@@ -3,211 +3,230 @@ import yfinance as yf
 import pandas as pd
 import json
 import os
+import datetime
 
 OVERRIDE_FILE = "dividend_overrides.json"
-DEFAULT_TICKERS = "VOW3.DE, INGA.AS, LHA.DE, NEDAP.AS, VICI, KMI, O, ENB, ECMPA.AS, COLD, VEI.OL, ALV.DE, DG.PA, SCMN.SW, IMB.L, ITX.MC, NESN.SW, SAN.PA"
+DEFAULT_TICKERS = (
+    "VOW3.DE, INGA.AS, LHA.DE, NEDAP.AS, VICI, KMI, O, ENB, "
+    "ECMPA.AS, COLD, VEI.OL, ALV.DE, DG.PA, SCMN.SW, IMB.L, "
+    "ITX.MC, NESN.SW, SAN.PA"
+)
 
-def load_overrides():
+# ------------------------------------------------------------------ #
+# Hilfsfunktionen
+# ------------------------------------------------------------------ #
+def load_overrides() -> dict:
     if os.path.exists(OVERRIDE_FILE):
         try:
-            with open(OVERRIDE_FILE, "r", encoding="utf-8") as f:
+            with open(OVERRIDE_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-            return {}
+            pass
     return {}
 
-def save_overrides(overrides):
+
+def save_overrides(overrides: dict) -> None:
     with open(OVERRIDE_FILE, "w", encoding="utf-8") as f:
         json.dump(overrides, f, ensure_ascii=False, indent=2)
 
-def get_fx_rate_yahoo(src="USD", dst="EUR"):
+
+@st.cache_data(ttl=3600)
+def fx_rate(src: str, dst: str = "EUR") -> float:
     if src == dst:
         return 1.0
     try:
         pair = f"{src}{dst}=X"
-        fx = yf.Ticker(pair)
-        fxdata = fx.history(period="1d")
-        rate = fxdata["Close"].iloc[-1]
+        rate = yf.Ticker(pair).history(period="1d")["Close"].iloc[-1]
         return float(rate)
     except Exception:
         return 1.0
 
-st.set_page_config(page_title="Dividendenrendite Tracker", layout="wide")
-st.title("Dividendenrendite Tracker (Streamlit-Version)")
 
-# Session State für Overrides und Formularsteuerung
+def price_changes(stock: yf.Ticker) -> list[str]:
+    """%-Änderungen für 1 Tag / 1 Woche / 1 Monat / 1 Jahr."""
+    try:
+        hist = stock.history(period="370d", interval="1d", auto_adjust=True)
+        if hist.empty:
+            return ["N/A"] * 4
+        close = hist["Close"].dropna()
+        latest = close.iloc[-1]
+        spans = [1, 7, 30, 365]
+        out = []
+        for d in spans:
+            target = close.index[-1] - pd.Timedelta(days=d)
+            past = close.loc[close.index >= target]
+            if past.empty:
+                out.append("N/A")
+                continue
+            past_price = past.iloc[0]
+            pct = (latest - past_price) / past_price * 100
+            s = "0,0" if abs(pct) < 0.05 else f"{pct:.1f}".replace(".", ",").lstrip("+")
+            out.append(s)
+        return out
+    except Exception:
+        return ["N/A"] * 4
+
+
+# ------------------------------------------------------------------ #
+# Streamlit-App
+# ------------------------------------------------------------------ #
+st.set_page_config(page_title="Dividendenrendite Tracker", layout="wide")
+st.title("Dividendenrendite Tracker (Streamlit)")
+
 if "dividend_overrides" not in st.session_state:
     st.session_state["dividend_overrides"] = load_overrides()
-if "show_override_form" not in st.session_state:
-    st.session_state["show_override_form"] = False
 
-# Eingabe der Ticker
+if "results" not in st.session_state:
+    st.session_state["results"] = None
+
+# Eingabe
 tickers_input = st.text_input(
-    "Aktien-Ticker (kommagetrennt, z.B. SAP.DE, MSFT, O, IMB.L)",
-    value=DEFAULT_TICKERS
+    "Aktien-Ticker (kommagetrennt, z. B. SAP.DE, MSFT, O, IMB.L)",
+    value=DEFAULT_TICKERS,
 )
 tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
-# Button-Leiste: Analyse ganz links, dann rechts Override und ganz rechts Löschen
-col_left, col_spacer, col_override, col_delete = st.columns([2, 10, 2, 2])
+# Buttons
+col_run, col_override, col_del = st.columns([2, 2, 2])
+run_clicked = col_run.button("Analyse starten", use_container_width=True)
+ov_clicked = col_override.button("Dividende manuell erfassen", use_container_width=True)
+del_clicked = col_del.button("Alle Overrides löschen", use_container_width=True)
 
-with col_left:
-    analyse_clicked = st.button("Analyse starten", use_container_width=True)
-
-with col_override:
-    override_clicked = st.button("Dividende manuell erfassen", use_container_width=True)
-
-with col_delete:
-    delete_clicked = st.button("Alle manuellen Dividenden löschen", use_container_width=True)
-
-# ROBUSTE LÖSUNG: Override-Änderungen verfolgen
-override_changed = st.session_state.pop("override_changed", False)
-
-if delete_clicked:
+# Overrides löschen
+if del_clicked:
     st.session_state["dividend_overrides"] = {}
     if os.path.exists(OVERRIDE_FILE):
         os.remove(OVERRIDE_FILE)
-    st.session_state["show_override_form"] = False
-    st.session_state["override_changed"] = True
-    st.rerun()
+    st.session_state["results"] = None
+    st.experimental_rerun()
 
-if override_clicked:
-    st.session_state["show_override_form"] = True
-
-# ROBUSTE LÖSUNG: Berechnung bei Analyse-Button, Override-Änderung oder fehlenden Ergebnissen
-if analyse_clicked or override_changed or "results" not in st.session_state:
-    results = []
-    for ticker in tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            company_name = info.get('longName') or info.get('shortName') or info.get('symbol') or ticker
-            resolved_ticker = info.get('symbol', ticker)
-            current_price = info.get('regularMarketPrice', info.get('currentPrice', 0))
-            currency_code = info.get('currency', 'USD')
-            
-            # UK-Fix: Kurs und Dividende in Pence → Pfund
-            if ticker.endswith('.L') and currency_code == "GBp":
-                if current_price:
-                    current_price = current_price / 100
-                currency_code = "GBP"
-            
-            fx_rate = get_fx_rate_yahoo(currency_code, "EUR") if currency_code != "EUR" else 1.0
-            price_eur = round(current_price * fx_rate, 2) if current_price else None
-
-            # Dividende: Erst Override (in Euro, direkt verwenden!), dann Yahoo, dann Historie
-            overrides = st.session_state["dividend_overrides"]
-            annual_dividend = overrides.get(ticker)
-            if annual_dividend is not None:
-                dividend_eur = annual_dividend
-            else:
-                annual_dividend = None
-                direct_dividend = info.get('trailingAnnualDividendRate')
-                if direct_dividend is not None and direct_dividend > 0:
-                    annual_dividend = direct_dividend
-                if ticker.endswith('.L') and info.get('currency', '') == "GBp" and annual_dividend:
-                    annual_dividend = annual_dividend / 100
-                if annual_dividend is None or annual_dividend == 0:
-                    dividend_yield = info.get('dividendYield')
-                    if dividend_yield is not None and dividend_yield > 0 and current_price and current_price > 0:
-                        if dividend_yield > 1:
-                            dividend_yield = dividend_yield / 100
-                        annual_dividend = current_price * dividend_yield
-                if (annual_dividend is None or annual_dividend == 0):
-                    try:
-                        history = stock.history(period="1y", actions=True, auto_adjust=True)
-                        if not history.empty and 'Dividends' in history.columns:
-                            dividends_last_year = history['Dividends'].sum()
-                            if ticker.endswith('.L') and info.get('currency', '') == "GBp":
-                                dividends_last_year = dividends_last_year / 100
-                            if dividends_last_year > 0:
-                                annual_dividend = dividends_last_year
-                    except Exception:
-                        pass
-                dividend_eur = round(annual_dividend * fx_rate, 2) if annual_dividend else None
-
-            dividend_found = dividend_eur is not None and dividend_eur > 0
-            if dividend_found and price_eur and price_eur > 0:
-                yield_percent = (dividend_eur / price_eur) * 100
-                dividend_str = f"€ {dividend_eur:,.2f}"
-                yield_str = f"{yield_percent:.2f}"
-            else:
-                dividend_str = "N/A"
-                yield_str = "N/A"
-            
-            price_str = f"€ {price_eur:,.2f}" if price_eur else "N/A"
-            results.append({
-                "Unternehmen": company_name,
-                "Ticker": resolved_ticker,
-                "Kurs (€)": price_str,
-                "Jahresdividende (€)": dividend_str,
-                "Dividendenrendite (%)": yield_str,
-            })
-        except Exception as e:
-            results.append({
-                "Unternehmen": f"Fehler bei '{ticker}'",
-                "Ticker": ticker,
-                "Kurs (€)": "N/A",
-                "Jahresdividende (€)": "N/A",
-                "Dividendenrendite (%)": "N/A"
-            })
-    st.session_state["results"] = pd.DataFrame(results)
-
-# Ergebnisse anzeigen
-if "results" in st.session_state and st.session_state["results"] is not None:
-    df = st.session_state["results"].copy()
-    
-    # Markiere überschrieben Werte
+# Analyse
+if run_clicked and tickers:
     overrides = st.session_state["dividend_overrides"]
-    override_tickers = set(overrides.keys())
-    highlight = []
-    for idx, row in df.iterrows():
-        if row["Ticker"] in override_tickers:
-            highlight.append(True)
-        else:
-            highlight.append(False)
-    
-    def highlight_overrides(val, is_override):
-        return 'background-color: #2A3B4D; color: #F9F9F9' if is_override else ''
-    
+    rows = []
+    for tkr in tickers:
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        try:
+            stk = yf.Ticker(tkr)
+            info = stk.info
+            name = (
+                info.get("longName")
+                or info.get("shortName")
+                or info.get("symbol")
+                or tkr
+            )
+            price = info.get("regularMarketPrice") or info.get("currentPrice")
+            cur = info.get("currency", "USD")
+            if tkr.endswith(".L") and cur == "GBp" and price:
+                price /= 100
+                cur = "GBP"
+            price_eur = round(price * fx_rate(cur), 2) if price else None
+
+            # Dividende
+            div = overrides.get(tkr)
+            if div is None:
+                direct = info.get("trailingAnnualDividendRate")
+                if direct and direct > 0:
+                    div = direct
+                else:
+                    dy = info.get("dividendYield") or 0
+                    if dy and price:
+                        dy = dy / 100 if dy > 1 else dy
+                        div = price * dy
+                    else:
+                        hist = stk.history(period="1y", actions=True, auto_adjust=True)
+                        div = hist["Dividends"].sum() if "Dividends" in hist else 0
+            div_eur = round(div * fx_rate(cur), 2) if div else None
+
+            div_str = f"€ {div_eur:,.2f}" if price_eur and div_eur else "N/A"
+            yld_str = (
+                f"{div_eur / price_eur * 100:.2f}"
+                if price_eur and div_eur
+                else "N/A"
+            )
+
+            changes = price_changes(stk)
+            change_str = "/".join(changes)
+
+            rows.append(
+                {
+                    "Unternehmen": name,
+                    "Ticker": tkr,
+                    "Kurs (€)": f"€ {price_eur:,.2f}" if price_eur else "N/A",
+                    "Jahresdividende (€)": div_str,
+                    "Dividendenrendite (%)": yld_str,
+                    "Veränderung T/W/M/J": change_str,
+                    "Stand": ts,
+                }
+            )
+        except Exception:
+            rows.append(
+                {
+                    "Unternehmen": f"Fehler bei '{tkr}'",
+                    "Ticker": tkr,
+                    "Kurs (€)": "N/A",
+                    "Jahresdividende (€)": "N/A",
+                    "Dividendenrendite (%)": "N/A",
+                    "Veränderung T/W/M/J": "N/A",
+                    "Stand": ts,
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    # Sortierung nach Tages-Veränderung (1. Wert vor dem ersten '/')
+    def day_change(val: str) -> float:
+        try:
+            return float(val.split("/")[0].replace(",", "."))
+        except Exception:
+            return float("-inf")
+
+    df["sort_key"] = df["Veränderung T/W/M/J"].apply(day_change)
+    df = df.sort_values("sort_key", ascending=False).drop(columns="sort_key")
+    st.session_state["results"] = df
+
+# Tabelle anzeigen
+if st.session_state["results"] is not None:
     st.dataframe(
-        df.style.apply(lambda x: [highlight_overrides(v, override) for v, override in zip(x, highlight)], axis=1),
-        use_container_width=True
+        st.session_state["results"],
+        use_container_width=True,
+        column_config={
+            "Kurs (€)": st.column_config.TextColumn(align="right"),
+            "Jahresdividende (€)": st.column_config.TextColumn(align="right"),
+            "Dividendenrendite (%)": st.column_config.TextColumn(align="right"),
+            "Veränderung T/W/M/J": st.column_config.TextColumn(align="right"),
+            "Stand": st.column_config.TextColumn(align="right"),
+        },
     )
 
-    # Manuelle Dividenden-Overrides: Dialog per Button, bleibt offen bis Speichern/Abbruch
-    if st.session_state["show_override_form"]:
-        company_ticker_map = {row["Unternehmen"]: row["Ticker"] for _, row in df.iterrows()}
-        company_names = sorted(company_ticker_map.keys())
-        
-        with st.form("override_form", clear_on_submit=True):
-            selected_company = st.selectbox("Unternehmen auswählen", company_names)
-            ticker = company_ticker_map[selected_company]
-            curr_override = overrides.get(ticker, "")
-            value = st.text_input("Dividende in Euro (leer = Override löschen)", value=str(curr_override) if curr_override != "" else "")
-            
-            col_save, col_cancel = st.columns([1,1])
-            submitted = col_save.form_submit_button("Speichern")
-            cancelled = col_cancel.form_submit_button("Abbrechen")
-            
-            if submitted:
-                value = value.replace(",", ".").strip()
-                if value == "":
-                    if ticker in overrides:
-                        del overrides[ticker]
-                else:
-                    try:
-                        overrides[ticker] = float(value)
-                    except Exception:
-                        st.error(f"Ungültiger Wert für {selected_company}: {value}")
-                        st.stop()
-                save_overrides(overrides)
-                st.session_state["dividend_overrides"] = overrides
-                st.session_state["show_override_form"] = False
-                # ROBUSTE LÖSUNG: Flag setzen statt results löschen
-                st.session_state["override_changed"] = True
-                st.rerun()
-            
-            if cancelled:
-                st.session_state["show_override_form"] = False
-                st.rerun()
+# Override-Dialog
+if ov_clicked and st.session_state["results"] is not None:
+    df = st.session_state["results"]
+    comp_map = {row["Unternehmen"]: row["Ticker"] for _, row in df.iterrows()}
+
+    with st.form("override_form", clear_on_submit=True):
+        st.subheader("Dividende manuell erfassen")
+        comp = st.selectbox("Unternehmen auswählen", list(comp_map.keys()))
+        tkr = comp_map[comp]
+        curr = st.session_state["dividend_overrides"].get(tkr, "")
+        val = st.text_input("Dividende in Euro (leer = löschen)", value=str(curr))
+        c1, c2 = st.columns(2)
+        save_btn = c1.form_submit_button("Speichern")
+        cancel_btn = c2.form_submit_button("Abbrechen")
+
+        if save_btn:
+            val = val.replace(",", ".").strip()
+            if val == "":
+                st.session_state["dividend_overrides"].pop(tkr, None)
+            else:
+                try:
+                    st.session_state["dividend_overrides"][tkr] = float(val)
+                except ValueError:
+                    st.error(f"Ungültiger Wert: {val}")
+                    st.stop()
+            save_overrides(st.session_state["dividend_overrides"])
+            st.success("Gespeichert")
+            st.session_state["results"] = None
+            st.experimental_rerun()
+
+        if cancel_btn:
+            st.experimental_rerun()
