@@ -1,6 +1,5 @@
 yfinance
 pandas
 requests
-tk
 alpha_vantage
 streamlit>=1.32
